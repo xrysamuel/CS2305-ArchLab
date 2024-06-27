@@ -24,7 +24,7 @@ cd gapbs
 make
 ```
 
-Modify the gem5 source files and recompile.
+Modify the gem5 source files and recompile it.
 
 ```bash
 mv gem5/src/cpu/pred/BranchPredictor.py gem5/src/cpu/pred/BranchPredictor.py.backup

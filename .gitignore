@@ -4,3 +4,4 @@ log/
 chisel-template/
 .vscode/
 .metals/
+.scalafmt.conf

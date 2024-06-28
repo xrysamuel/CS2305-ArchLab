@@ -6,8 +6,8 @@ import chisel3.util._
 case class MatMulConfig(
     vecDWidth: Int = 8, // Precision of matrices A and B (8 bits)
     resDWidth: Int = 32, // Precision of result matrix C (32 bits)
-    matSize: Int = 4, // Size of the matrices (16x16)
-    gemm_matsize: Int = 8, // Size of the matrices for GEMM (32x32)
+    matSize: Int = 4, // Size of the matrices
+    gemm_matsize: Int = 16, // Size of the matrices for GEMM
     SEL_A: UInt = 0.U, // Operation selection for matrix A
     SEL_B: UInt = 1.U, // Operation selection for matrix B
     SEL_C: UInt = 2.U, // Operation selection for matrix C
@@ -42,6 +42,11 @@ class GEMM_TOP(cfg: MatMulConfig) extends Module {
 
     // compute finish
     val busy = Output(Bool())
+
+    // actual matrix size
+    val N = Input(UInt(log2Ceil(cfg.gemm_matsize+1).W))
+    val M = Input(UInt(log2Ceil(cfg.gemm_matsize+1).W))
+    val K = Input(UInt(log2Ceil(cfg.gemm_matsize+1).W))
   })
 
   val memory_module = Module(new MatMem(cfg.memory_size, cfg.memory_width))
@@ -59,6 +64,10 @@ class GEMM_TOP(cfg: MatMulConfig) extends Module {
   mat_module.io.start := io.start
   io.dataOut := memory_module.io.dataOut.asSInt
   io.busy := mat_module.io.busy
+
+  mat_module.io.iMax := io.N - 1.U
+  mat_module.io.jMax := io.M - 1.U
+  mat_module.io.kMax := io.K - 1.U
 }
 
 class MatMem(MEM_ROW: Int, MEM_WIDTH: Int) extends Module {
@@ -70,13 +79,13 @@ class MatMem(MEM_ROW: Int, MEM_WIDTH: Int) extends Module {
     val dataOut = Output(SInt(MEM_WIDTH.W))
   })
 
-  val mem = SyncReadMem(MEM_ROW, SInt(MEM_WIDTH.W))
+  val mem = SyncReadMem(MEM_ROW,UInt(MEM_WIDTH.W))
 
   // single port
   when(io.writeEn & io.en) {
-    mem.write(io.addr, io.dataIn)
+    mem.write(io.addr,io.dataIn.asUInt)
   }
-  io.dataOut := mem.read(io.addr, io.en && (!io.writeEn))
+  io.dataOut := mem.read(io.addr, io.en&&(!io.writeEn)).asSInt
 }
 
 // **********************************************************************
@@ -88,22 +97,84 @@ class MatMulModule(cfg: MatMulConfig) extends Module {
     val enable = Output(Bool())
     val dataIn = Input(SInt(cfg.memory_width.W))
     val dataOut = Output(SInt(cfg.memory_width.W))
+    
+    val iMax = Input(UInt(log2Ceil(cfg.gemm_matsize).W))
+    val jMax = Input(UInt(log2Ceil(cfg.gemm_matsize).W))
+    val kMax = Input(UInt(log2Ceil(cfg.gemm_matsize).W))
 
     val start = Input(Bool())
     val busy = Output(Bool())
   })
 
+  val tileMulModule = Module(new TileMulModule(cfg))
+  val iStart = Reg(UInt(log2Ceil(cfg.gemm_matsize + cfg.matSize).W))
+  val kStart = Reg(UInt(log2Ceil(cfg.gemm_matsize + cfg.matSize).W))
+  val iStartNext = Wire(UInt(log2Ceil(cfg.gemm_matsize + cfg.matSize).W))
+  val kStartNext = Wire(UInt(log2Ceil(cfg.gemm_matsize + cfg.matSize).W))
+  object State extends ChiselEnum {
+    val idle, computing = Value
+  }
+  import State._
+  val state = RegInit(idle)
+
+  io.addr := tileMulModule.io.addr
+  io.writeEn := tileMulModule.io.writeEn
+  io.enable := tileMulModule.io.enable
+  tileMulModule.io.dataIn := io.dataIn
+  io.dataOut := tileMulModule.io.dataOut
+  tileMulModule.io.iStart := iStart
+  tileMulModule.io.kStart := kStart
+  tileMulModule.io.iMask := Mux(io.iMax - iStart < cfg.matSize.U, io.iMax - iStart, (cfg.matSize - 1).U) 
+  tileMulModule.io.kMask := Mux(io.kMax - kStart < cfg.matSize.U, io.kMax - kStart, (cfg.matSize - 1).U) 
+  tileMulModule.io.jMax := io.jMax
+  iStartNext := iStart + cfg.matSize.U
+  kStartNext := kStart + cfg.matSize.U
+  io.busy := false.B
+  tileMulModule.io.start := false.B
+
+  switch (state) {
+    is (idle) {
+      io.busy := false.B
+
+      when(io.start) {
+        tileMulModule.io.start := true.B
+        iStart := 0.U
+        kStart := 0.U
+        
+        state := computing
+      }
+    }
+
+    is (computing) {
+      io.busy := true.B
+      tileMulModule.io.start := false.B
+
+      when (tileMulModule.io.busy) {
+        state := computing
+      } .otherwise {
+        when (kStartNext > io.kMax) {
+          when (iStartNext > io.iMax) {
+            state := idle
+          } .otherwise {
+            kStart := 0.U
+            iStart := iStartNext
+            tileMulModule.io.start := true.B
+            state := computing
+          }
+        } .otherwise {
+          kStart := kStartNext
+          tileMulModule.io.start := true.B
+          state := computing
+        }
+      }
+    }
+  }
+
+  
+
 
 }
 
-class MatMulScheduler(cfg: MatMulConfig) extends Module {
-  val io = IO(new Bundle {
-    val start = Input(Bool())
-    val busy = Output(Bool())
-
-  })
-
-}
 
 class TileMulModule(cfg: MatMulConfig) extends Module {
   val io = IO(new Bundle {
@@ -120,22 +191,21 @@ class TileMulModule(cfg: MatMulConfig) extends Module {
     val jMax = Input(UInt(log2Ceil(cfg.gemm_matsize).W))
 
     val start = Input(Bool())
-    val flush = Input(Bool())
     val busy = Output(Bool())
   })
   /*
    * TileMulModule: C[tile_i][tile_k] = The sum of A[tile_i][tile_j] * B[tile_j][tile_k] over tile_j
    * SA: C[tile_i][tile_k] += A[tile_i][tile_j] * B[tile_j][tile_k]
-   *
-   * 0: if start && !flush
-   *        jump 1 ()
+   * 
+   * 0: if start
+   *        jump 1 (flush)
    *    else 
-   *        jump 0 ()
+   *        jump 0 (flush)
    * 1: counter = 0 (stall, busy)
    * 2: aIn[:] = 0, bIn[:] = 0, index = max(counter - jMax, 0) (busy)
-   * 3: dataOut = A[iStart+index][counter-index], jump 5 (stall, busy)
-   * 4: dataOut = A[iStart+index][counter-index], bIn[index-1] = dataOut (stall, busy)
-   * 5: dataOut = B[counter-index][kStart+index], aIn[index] = dataOut (stall, busy)
+   * 3: dataIn = A[iStart+index][counter-index], jump 5 (stall, busy)
+   * 4: dataIn = A[iStart+index][counter-index], bIn[index-1] = dataIn (stall, busy)
+   * 5: dataIn = B[counter-index][kStart+index], aIn[index] = dataIn (stall, busy)
    *    if index = min(counter, matSize - 1)
    *        if counter == matSize - 1 + jMax
    *            jump 7 (stall, busy)
@@ -143,25 +213,165 @@ class TileMulModule(cfg: MatMulConfig) extends Module {
    *            counter++, jump 6 (stall, busy)
    *    else
    *        index++, jump 4 (stall, busy)
-   * 6: bIn[index] = dataOut, jump 2 (stall, busy)
-   * 7: bIn[index] = dataOut, counter = 0, jump 8 (stall, busy)
-   * 8: if counter == matSize
+   * 6: bIn[index] = dataIn, jump 2 (stall, busy)
+   * 7: bIn[index] = dataIn, counter = 0, jump 8 (stall, busy)
+   * 8: C[iStart+counter/matSize][kStart+counter%matSize] = out[counter/matSize][counter%matSize]
+   *    aIn[:] = 0, bIn[:] = 0, 
+   *    if counter == matSize * matSize - 1
    *        jump 0 (busy)
    *    else
-   *        aIn[:] = 0, bIn[:] = 0, counter++, jump 8 (busy)
+   *        counter++, jump 8 (busy)
    */
 
   val sa = Module(new SA(cfg.matSize, cfg.vecDWidth, cfg.resDWidth))
-  val aIn = Seq.fill(cfg.matSize)(RegInit(0.S(cfg.vecDWidth.W)))
-  val bIn = Seq.fill(cfg.matSize)(RegInit(0.S(cfg.vecDWidth.W)))
+  val addressConvertor = Module(new AddressConvertor(cfg))
+  val aIn = RegInit(VecInit(Seq.fill(cfg.matSize)(0.S(cfg.vecDWidth.W))))
+  val bIn = RegInit(VecInit(Seq.fill(cfg.matSize)(0.S(cfg.vecDWidth.W))))
+  val resetIn = VecInit(Seq.fill(cfg.matSize)(0.S(cfg.vecDWidth.W)))
+  val state = RegInit(0.U(4.W))
+  val counter = RegInit(0.U(log2Ceil(cfg.matSize * cfg.matSize + cfg.gemm_matsize).W))
+  val index = RegInit(0.U(log2Ceil(cfg.matSize).W))
+  val indexMin = Wire(UInt(log2Ceil(cfg.matSize).W))
+  val indexMax = Wire(UInt(log2Ceil(cfg.matSize).W))
+
+  // default value
+  sa.io.stall := false.B
   sa.io.flush := false.B
-  sa.io.stall := true.B
+  io.busy := false.B
   for (i <- 0 until cfg.matSize) {
-    sa.io.inHorizontal(i) := Mux(iMask < i.U, 0.U, aIn(i))
-    sa.io.inVertical(i) := Mux(kMask < i.U, 0.U, bIn(i))
+    sa.io.inHorizontal(i) := Mux(io.iMask < i.U, 0.S, aIn(i))
+    sa.io.inVertical(i) := Mux(io.kMask < i.U, 0.S, bIn(i))
+  }
+  io.addr := addressConvertor.io.addr
+  io.writeEn := false.B
+  io.enable := false.B
+  io.dataOut := 0.S
+  addressConvertor.io.x := 0.U
+  addressConvertor.io.y := 0.U
+  addressConvertor.io.buf_sel := cfg.SEL_A
+  indexMin := Mux(counter > io.jMax, counter - io.jMax, 0.U)
+  indexMax := Mux(counter < (cfg.matSize - 1).U, counter, (cfg.matSize - 1).U)
+
+
+  val readMemory = (sel: UInt, x: UInt, y: UInt) => {
+    io.writeEn := false.B
+    io.enable := true.B
+    addressConvertor.io.x := x
+    addressConvertor.io.y := y
+    addressConvertor.io.buf_sel := sel
+  }
+  
+  val writeMemory = (sel: UInt, x: UInt, y: UInt, dataOut: SInt) => {
+    io.writeEn := true.B
+    io.enable := true.B
+    io.dataOut := dataOut
+    addressConvertor.io.x := x
+    addressConvertor.io.y := y
+    addressConvertor.io.buf_sel := sel
+  }
+
+  val clearSAIn = () => {
+    aIn := resetIn
+    bIn := resetIn
   }
 
 
+  switch (state) {
+    is(0.U) {
+      sa.io.flush := true.B
+
+      when(io.start) {
+        state := 1.U
+      } .otherwise {
+        state := 0.U
+      }
+    }
+
+    is(1.U) {
+      sa.io.stall := true.B
+      io.busy := true.B
+      
+      counter := 0.U
+      state := 2.U
+    }
+
+    is(2.U) {
+      io.busy := true.B
+
+      clearSAIn()
+      index := indexMin
+      state := 3.U
+    }
+
+    is(3.U) {
+      sa.io.stall := true.B
+      io.busy := true.B
+
+      readMemory(cfg.SEL_A, io.iStart + index, counter - index)
+      state := 5.U
+    }
+
+    is(4.U) {
+      sa.io.stall := true.B
+      io.busy := true.B
+
+      readMemory(cfg.SEL_A, io.iStart + index, counter - index)
+      bIn(index - 1.U) := io.dataIn
+      state := 5.U
+    }
+
+    is(5.U) {
+      sa.io.stall := true.B
+      io.busy := true.B
+
+      readMemory(cfg.SEL_B, counter - index, io.kStart + index)
+      aIn(index) := io.dataIn
+      when(index === indexMax) {
+        when(counter - io.jMax === (cfg.matSize - 1).U) {
+          state := 7.U
+        } .otherwise {
+          counter := counter + 1.U
+          state := 6.U
+        }
+      } .otherwise {
+        index := index + 1.U
+        state := 4.U
+      }
+    }
+
+    is(6.U) {
+      sa.io.stall := true.B
+      io.busy := true.B
+
+      bIn(index) := io.dataIn
+      state := 2.U
+    }
+
+    is(7.U) {
+      sa.io.stall := true.B
+      io.busy := true.B
+
+      bIn(index) := io.dataIn
+      counter := 0.U
+      state := 8.U
+    }
+
+    is(8.U) {
+      io.busy := true.B
+
+      writeMemory(cfg.SEL_C,
+            io.iStart + counter / cfg.matSize.U,
+            io.kStart + counter % cfg.matSize.U,
+            sa.io.out(counter))
+      clearSAIn()
+      when(counter === (cfg.matSize * cfg.matSize - 1).U) {
+        state := 0.U
+      } .otherwise {
+        counter := counter + 1.U
+        state := 8.U
+      }
+    }
+  }
 }
 
 class SA(val matSize: Int = 4, val width: Int = 8, val resDWidth: Int = 32) extends Module {
@@ -223,7 +433,7 @@ class SACell(val width: Int = 8, val resDWidth: Int = 32) extends Module {
   val regV = RegInit(0.S(width.W))
   val res = RegInit(0.S(resDWidth.W))
 
-  when(io.stall === false.B)
+  when(io.stall === false.B && io.flush === false.B)
   {
     regH := io.inHorizontal
     regV := io.inVertical
@@ -242,17 +452,15 @@ class SACell(val width: Int = 8, val resDWidth: Int = 32) extends Module {
 }
 
 
-class MatAddressConvertor(cfg: MatMulConfig) extends Module {
+class AddressConvertor(cfg: MatMulConfig) extends Module {
   val io = IO(new Bundle {
-    val elem_ptr = Input(UInt(log2Ceil(cfg.gemm_elem_num).W))
-    val tile_x = Input(UInt(log2Ceil(cfg.gemm_matsize / cfg.matSize).W))
-    val tile_y = Input(UInt(log2Ceil(cfg.gemm_matsize / cfg.matSize).W))
+    val x = Input(UInt(log2Ceil(cfg.gemm_matsize).W))
+    val y = Input(UInt(log2Ceil(cfg.gemm_matsize).W))
     val buf_sel = Input(UInt(log2Ceil(3).W))
     val addr = Output(UInt(log2Ceil(cfg.memory_size).W))
   })
   val offset_addr = Wire(UInt(log2Ceil(cfg.gemm_elem_num).W))
-  offset_addr := ((io.tile_x * cfg.matSize.U + io.elem_ptr / cfg.matSize.U) * cfg.gemm_matsize.U
-    + (io.tile_y * cfg.matSize.U + io.elem_ptr % cfg.matSize.U)) // 这里用移位操作更好
+  offset_addr := io.x * cfg.gemm_matsize.U + io.y
   io.addr := MuxCase(
     0.U,
     Seq(

@@ -1,5 +1,7 @@
 # How to Run
 
+## Matrix Multiplication Module Test
+
 Install JDK.
 
 ```bash
@@ -50,4 +52,23 @@ Run test.
 
 ```bash
 sbt "testOnly GEMM.GEMMTest -- -DwriteVcd=1"
+```
+
+## Chipyard
+
+Setup chipyard.
+
+```bash
+conda install -n base conda-libmamba-solver
+conda config --set solver libmamba
+conda install -n base conda-lock==1.4.0
+conda activate base
+git clone https://github.com/ucb-bar/chipyard.git
+cd chipyard
+./build-setup.sh riscv-tools -s 6 -s 7 -s 8 -s 9
+source env.sh
+cd sims/verilator/
+make CONFIG=RocketConfig VERILATOR_THREADS=12 -j 12
+cd tests/
+make
 ```

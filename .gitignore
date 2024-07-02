@@ -5,3 +5,4 @@ chisel-template/
 .vscode/
 .metals/
 .scalafmt.conf
+chipyard/

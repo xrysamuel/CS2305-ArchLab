@@ -16,7 +16,7 @@ build/X86/gem5.opt configs/learning_gem5/part1/simple.py
 build/X86/gem5.opt configs/learning_gem5/part2/simple_cache.py
 ```
 
-Download GAP Benchmark Suite and compile it.
+Download and compile the GAP Benchmark Suite.
 
 ```bash
 git clone https://github.com/sbeamer/gapbs.git
@@ -24,7 +24,7 @@ cd gapbs
 make
 ```
 
-Modify the gem5 source files and recompile it.
+Modify the GEM5 source files and recompile them.
 
 ```bash
 mv gem5/src/cpu/pred/BranchPredictor.py gem5/src/cpu/pred/BranchPredictor.py.backup

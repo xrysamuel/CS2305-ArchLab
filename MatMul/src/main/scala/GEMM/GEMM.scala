@@ -197,30 +197,30 @@ class TileMulModule(cfg: MatMulConfig) extends Module {
    * TileMulModule: C[tile_i][tile_k] = The sum of A[tile_i][tile_j] * B[tile_j][tile_k] over tile_j
    * SA: C[tile_i][tile_k] += A[tile_i][tile_j] * B[tile_j][tile_k]
    * 
-   * 0: if start
-   *        jump 1 (flush)
-   *    else 
-   *        jump 0 (flush)
-   * 1: counter = 0 (stall, busy)
-   * 2: aIn[:] = 0, bIn[:] = 0, index = max(counter - jMax, 0) (busy)
-   * 3: dataIn = A[iStart+index][counter-index], jump 5 (stall, busy)
-   * 4: dataIn = A[iStart+index][counter-index], bIn[index-1] = dataIn (stall, busy)
-   * 5: dataIn = B[counter-index][kStart+index], aIn[index] = dataIn (stall, busy)
-   *    if index = min(counter, matSize - 1)
-   *        if counter == matSize - 1 + jMax
-   *            jump 7 (stall, busy)
+   * idle:  if start
+   *            jump loop1 (flush)
+   *        else 
+   *            jump idle (flush)
+   * loop1: counter = 0 (stall, busy)
+   * loop2: aIn[:] = 0, bIn[:] = 0, index = max(counter - jMax, 0)
+   *        dataIn = A[iStart+index][counter-index], jump loadB (busy)
+   * loadA: dataIn = A[iStart+index][counter-index], bIn[index-1] = dataIn (stall, busy)
+   * loadB: dataIn = B[counter-index][kStart+index], aIn[index] = dataIn (stall, busy)
+   *        if index = min(counter, matSize - 1)
+   *            if counter == matSize - 1 + jMax
+   *                jump end1(stall, busy)
+   *            else
+   *                counter++, jump end2 (stall, busy)
    *        else
-   *            counter++, jump 6 (stall, busy)
-   *    else
-   *        index++, jump 4 (stall, busy)
-   * 6: bIn[index] = dataIn, jump 2 (stall, busy)
-   * 7: bIn[index] = dataIn, counter = 0, jump 8 (stall, busy)
-   * 8: C[iStart+counter/matSize][kStart+counter%matSize] = out[counter/matSize][counter%matSize]
-   *    aIn[:] = 0, bIn[:] = 0, 
-   *    if counter == matSize * matSize - 1
-   *        jump 0 (busy)
-   *    else
-   *        counter++, jump 8 (busy)
+   *            index++, jump loadA (stall, busy)
+   * end2:  bIn[index] = dataIn, jump loop2 (stall, busy)
+   * end1:  bIn[index] = dataIn, counter = 0, jump storeC (stall, busy)
+   * storeC:C[iStart+counter/matSize][kStart+counter%matSize] = out[counter/matSize][counter%matSize]
+   *        aIn[:] = 0, bIn[:] = 0, 
+   *        if counter == matSize * matSize - 1
+   *            jump idle (busy)
+   *        else
+   *            counter++, jump storeC (busy)
    */
 
   val sa = Module(new SA(cfg.matSize, cfg.vecDWidth, cfg.resDWidth))
@@ -228,7 +228,8 @@ class TileMulModule(cfg: MatMulConfig) extends Module {
   val aIn = RegInit(VecInit(Seq.fill(cfg.matSize)(0.S(cfg.vecDWidth.W))))
   val bIn = RegInit(VecInit(Seq.fill(cfg.matSize)(0.S(cfg.vecDWidth.W))))
   val resetIn = VecInit(Seq.fill(cfg.matSize)(0.S(cfg.vecDWidth.W)))
-  val state = RegInit(0.U(4.W))
+  val idle :: loop1 :: loop2 :: loadA :: loadB :: end2 :: end1 :: storeC :: Nil = Enum(8)
+  val state = RegInit(idle)
   val counter = RegInit(0.U(log2Ceil(cfg.matSize * cfg.matSize + cfg.gemm_matsize).W))
   val index = RegInit(0.U(log2Ceil(cfg.matSize).W))
   val indexMin = Wire(UInt(log2Ceil(cfg.matSize).W))
@@ -275,52 +276,44 @@ class TileMulModule(cfg: MatMulConfig) extends Module {
     bIn := resetIn
   }
 
-
   switch (state) {
-    is(0.U) {
+    is(idle) {
       sa.io.flush := true.B
 
       when(io.start) {
-        state := 1.U
+        state := loop1
       } .otherwise {
-        state := 0.U
+        state := idle
       }
     }
 
-    is(1.U) {
+    is(loop1) {
       sa.io.stall := true.B
       io.busy := true.B
       
       counter := 0.U
-      state := 2.U
+      state := loop2
     }
 
-    is(2.U) {
+    is(loop2) {
       io.busy := true.B
 
       clearSAIn()
       index := indexMin
-      state := 3.U
+      readMemory(cfg.SEL_A, io.iStart + indexMin, counter - indexMin)
+      state := loadB
     }
 
-    is(3.U) {
-      sa.io.stall := true.B
-      io.busy := true.B
-
-      readMemory(cfg.SEL_A, io.iStart + index, counter - index)
-      state := 5.U
-    }
-
-    is(4.U) {
+    is(loadA) {
       sa.io.stall := true.B
       io.busy := true.B
 
       readMemory(cfg.SEL_A, io.iStart + index, counter - index)
       bIn(index - 1.U) := io.dataIn
-      state := 5.U
+      state := loadB
     }
 
-    is(5.U) {
+    is(loadB) {
       sa.io.stall := true.B
       io.busy := true.B
 
@@ -328,35 +321,35 @@ class TileMulModule(cfg: MatMulConfig) extends Module {
       aIn(index) := io.dataIn
       when(index === indexMax) {
         when(counter - io.jMax === (cfg.matSize - 1).U) {
-          state := 7.U
+          state := end1
         } .otherwise {
           counter := counter + 1.U
-          state := 6.U
+          state := end2
         }
       } .otherwise {
         index := index + 1.U
-        state := 4.U
+        state := loadA
       }
     }
 
-    is(6.U) {
+    is(end2) {
       sa.io.stall := true.B
       io.busy := true.B
 
       bIn(index) := io.dataIn
-      state := 2.U
+      state := loop2
     }
 
-    is(7.U) {
+    is(end1) {
       sa.io.stall := true.B
       io.busy := true.B
 
       bIn(index) := io.dataIn
       counter := 0.U
-      state := 8.U
+      state := storeC
     }
 
-    is(8.U) {
+    is(storeC) {
       io.busy := true.B
 
       writeMemory(cfg.SEL_C,
@@ -368,7 +361,7 @@ class TileMulModule(cfg: MatMulConfig) extends Module {
         state := 0.U
       } .otherwise {
         counter := counter + 1.U
-        state := 8.U
+        state := storeC
       }
     }
   }

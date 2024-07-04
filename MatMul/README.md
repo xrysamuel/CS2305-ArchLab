@@ -45,16 +45,24 @@ Download Chisel template.
 git clone --recursive https://github.com/freechipsproject/chisel-template.git
 cp build.sbt chisel-template/build.sbt
 cp build.sc chisel-template/build.sc
-cp src chisel-template/src
+cp -r src chisel-template/
 ```
 
 Run test.
 
 ```bash
+cd chisel-template/
 sbt "testOnly GEMM.GEMMTest -- -DwriteVcd=1"
 ```
 
 ## Chipyard
+
+Install conda.
+
+```bash
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+bash Miniconda3-latest-Linux-x86_64.sh
+```
 
 Setup chipyard.
 

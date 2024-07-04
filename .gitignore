@@ -6,3 +6,4 @@ chisel-template/
 .metals/
 .scalafmt.conf
 chipyard/
+.bloop/

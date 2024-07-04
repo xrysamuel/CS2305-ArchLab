@@ -59,60 +59,56 @@ class Result:
         self.flush = flush
 
 
-
-def step0(s: State):
-    return Result(next_step=1, flush=True)
+def step_idle(s: State):
+    return Result(next_step="step_loop1", flush=True)
 
     
-def step1(s: State):
+def step_loop1(s: State):
     s.counter = 0
-    return Result(next_step=2, stall=True, busy=True)
+    return Result(next_step="step_loop2", stall=True, busy=True)
 
 
-def step2(s: State):
+def step_loop2(s: State):
     s.aIn = [Element(zero=True) for i in range(s.matSize)]
     s.bIn = [Element(zero=True) for i in range(s.matSize)]
     s.index = max(s.counter - s.jMax, 0)
-    return Result(next_step=3, busy=True)
+    s.dataIn = Element("A", s.iStart + max(s.counter - s.jMax, 0), 
+                       s.counter - max(s.counter - s.jMax, 0))
+    return Result(next_step="step_loadB", busy=True)
 
 
-def step3(s: State):
-    s.dataIn = Element("A", s.iStart + s.index, s.counter - s.index)
-    return Result(next_step=5, stall=True, busy=True)
-
-
-def step4(s: State):
+def step_loadA(s: State):
     s.bIn[s.index - 1] = s.dataIn
     s.dataIn = Element("A", s.iStart + s.index, s.counter - s.index)
-    return Result(next_step=5, stall=True, busy=True)
+    return Result(next_step="step_loadB", stall=True, busy=True)
 
 
-def step5(s: State):
+def step_loadB(s: State):
     s.aIn[s.index] = s.dataIn
     s.dataIn = Element("B", s.counter - s.index, s.kStart + s.index)
     if s.index == min(s.counter, s.matSize - 1):
         if s.counter == s.matSize - 1 + s.jMax:
-            return Result(next_step=7, stall=True, busy=True)
+            return Result(next_step="step_end1", stall=True, busy=True)
         else:
             s.counter += 1
-            return Result(next_step=6, stall=True, busy=True)
+            return Result(next_step="step_end2", stall=True, busy=True)
     else:
         s.index += 1
-        return Result(next_step=4, stall=True, busy=True)
+        return Result(next_step="step_loadA", stall=True, busy=True)
     
 
-def step6(s: State):
+def step_end2(s: State):
     s.bIn[s.index] = s.dataIn
-    return Result(next_step=2, stall=True, busy=True)
+    return Result(next_step="step_loop2", stall=True, busy=True)
 
 
-def step7(s: State):
+def step_end1(s: State):
     s.bIn[s.index] = s.dataIn
     s.counter = 0
-    return Result(next_step=8, stall=True, busy=True)
+    return Result(next_step="step_storeC", stall=True, busy=True)
 
             
-def step8(s: State):
+def step_storeC(s: State):
     print(f"\nC[{s.iStart + s.counter // s.matSize}][{s.kStart + s.counter % s.matSize}] = ", end='')
     for m1, m2 in s.sa.cells[s.counter // s.matSize][s.counter % s.matSize]:
         print(f"({m1} * {m2}) + ", end='')
@@ -120,19 +116,22 @@ def step8(s: State):
     s.aIn = [Element(zero=True) for i in range(s.matSize)]
     s.bIn = [Element(zero=True) for i in range(s.matSize)]
     if s.counter == s.matSize * s.matSize - 1:
-        return Result(next_step=0, busy=True)
+        return Result(next_step="step_idle", busy=True)
     else:
         s.counter += 1
-        return Result(next_step=8, busy=True)
+        return Result(next_step="step_storeC", busy=True)
     
 
-steps = [step0, step1, step2, step3, step4, step5, step6, step7, step8]
-cur_step = 0
+def execute(step, state):
+    step_func = globals().get(step)
+    return step_func(state)
+
+cur_step = "step_idle"
 state = State()
 for i in range(2):
     for clock in range(1000):
         prev_state = copy(state)
-        result = steps[cur_step](state)
+        result = execute(cur_step, state)
         if result.stall == False:
             state.sa.step(prev_state.aIn, prev_state.bIn)
             print(clock, cur_step, prev_state.aIn, prev_state.bIn)

@@ -1,4 +1,4 @@
-# How to Run
+# Getting Started
 
 Download and compile GEM5.
 

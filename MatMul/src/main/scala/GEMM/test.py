@@ -1,3 +1,5 @@
+# Functional testing of the state machine controlling the systolic array in GEMM.scala.
+
 from copy import copy
 
 class Element:

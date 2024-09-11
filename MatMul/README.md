@@ -1,4 +1,4 @@
-# How to Run
+# Getting Started
 
 ## Matrix Multiplication Module Test
 
@@ -48,35 +48,10 @@ cp build.sc chisel-template/build.sc
 cp -r src chisel-template/
 ```
 
-Run test.
+Run the module test.
 
 ```bash
 cd chisel-template/
 sbt "testOnly GEMM.GEMMTest -- -DwriteVcd=1"
 ```
 
-## Chipyard
-
-Install conda.
-
-```bash
-wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
-bash Miniconda3-latest-Linux-x86_64.sh
-```
-
-Setup chipyard.
-
-```bash
-conda install -n base conda-libmamba-solver
-conda config --set solver libmamba
-conda install -n base conda-lock==1.4.0
-conda activate base
-git clone https://github.com/ucb-bar/chipyard.git
-cd chipyard
-./build-setup.sh riscv-tools -s 6 -s 7 -s 8 -s 9
-source env.sh
-cd sims/verilator/
-make CONFIG=RocketConfig VERILATOR_THREADS=12 -j 12
-cd tests/
-make
-```

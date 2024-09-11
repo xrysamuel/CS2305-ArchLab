@@ -1,12 +1,12 @@
 # Optimizing Matrix Transpose on GPUs
 
-## 1 Implementation of Matrix Transpose
+## 1 Implementating Matrix Transpose
 
-In this lab, our goal is to implement and evaluate the matrix transpose operation. We aim to transpose an $N \times N$ single-precision floating-point matrix, with the input and output stored in separate memory arrays. Different versions of the matrix transpose will be implemented to compare their performance.
+In this lab, we aim to implement and assess the matrix transpose operation. Our focus lies in transposing an $N \times N$ single-precision floating-point matrix, with distinct memory arrays allocated for the input and output. Various iterations of the matrix transpose will be carried out to facilitate a comparative performance analysis.
 
-### 1.1 CPU Implementation of Matrix Transpose
+### 1.1 Matrix Transpose On CPU
 
-On the CPU, we use the simplest method for matrix transposition, which involves a nested loop structure. This method is optimized with the `-O2` compiler flag and has a time complexity of $O(n^2)$.
+On CPU, we adopt the most straightforward method, which involves a nested loop structure and is optimized with the `-O2` compiler flag. It has a time complexity of $O(n^2)$.
 
 ```c
 void transposeCPU(float *inputMat, float *outputMat, int N)
@@ -21,7 +21,7 @@ void transposeCPU(float *inputMat, float *outputMat, int N)
 }
 ```
 
-### 1.2 GPU Implementation of Matrix Transpose
+### 1.2 Matrix Transpose on GPU
 
 ```c
 __global__ void transposeNaive(float *inputMat, float *outputMat, int N)
@@ -36,9 +36,9 @@ __global__ void transposeNaive(float *inputMat, float *outputMat, int N)
 }
 ```
 
-In this naive GPU implementation of the matrix transpose, each thread is responsible for moving an element from `inputMat` to the corresponding position in `outputMat`. The kernel function calculates the indices `in_x` and `in_y` for the element that the current thread handles in the input matrix, and then copies this element to the output matrix. Assuming all threads execute in parallel, the time complexity can be $O(1)$.
+In this naive GPU implementation of the matrix transpose, each thread is tasked with moving an element from `inputMat` to the corresponding position in `outputMat`. The kernel function first computes the indices `in_x` and `in_y` for the element managed by the current thread in the input matrix, and then copies this element to the output matrix. Assuming all threads execute in parallel, the time complexity can be considered $O(1)$.
 
-While the naive approach theoretically achieves optimal performance, it does not fully exploit the characteristics of Global Memory. In Global Memory, threads within the same block read from consecutive positions but write to positions at intervals. For optimal performance, we want the write operations to be relatively contiguous, facilitating more coalesced memory accesses. To achieve this, we can utilize Shared Memory for temporary data storage and transfer.
+While the naive approach theoretically achieves optimal performance, it fails to fully leverage the characteristics of Global Memory. In Global Memory, threads within the same block read from consecutive positions but write to positions spaced apart. To optimize performance, we want the write operations to be more contiguous, thereby facilitating more coalesced memory accesses. To achieve this, we can utilize Shared Memory for temporary data storage and transfer.
 
 ### 1.3 Optimization Using Shared Memory
 
@@ -68,15 +68,15 @@ __global__ void transposeShared(float *inputMat, float *outputMat, int N)
 
 In this version of matrix transpose implementation, we first declare an array in Shared Memory. This array is shared among threads within a thread block and has the same lifespan as the block.
 
-Blocked matrix transpose is based on the mathematical fact that if a matrix can be blocked as $A = (A_{ij})$, its transpose is $A^T = (A^T_{ji})$. Each thread block loads a blocked portion of the input matrix from Global Memory into Shared Memory and writes back this blocked portion in the order of the transpose to the corresponding position in the output matrix in Global Memory. It is important to insert `__syncthreads();` after loading into Shared Memory to ensure that all threads in the block have finished loading before proceeding to the write-back operation.
+Blocked matrix transpose hinges on the mathematical fact that if a matrix can be blocked as $A = (A_{ij})$, its transpose is $A^T = (A^T_{ji})$. Each thread block loads a submatrix from Global Memory into Shared Memory and writes back this submatrix in transposed order to the corresponding position in the output matrix in Global Memory. It is important to insert `__syncthreads();` after loading into Shared Memory to ensure that all threads in the block have finished loading before proceeding to the write-back operation.
 
-This approach ensures that the block's access to Global Memory is localized.
+This approach localizes the block's access to Global Memory.
 
 ### 1.4 Considering Bank Conflicts
 
-For a Shared Memory space with $32 \times 32$ elements, all elements in a column are mapped to the same bank, resulting in bank conflicts: reading a column data causes 32-way bank conflicts. To avoid this, we can increase the number of columns in the Shared Memory space from 32 to 33, so that the elements in a column will not reside in the same bank.
+In a Shared Memory space with $32 \times 32$ elements, all elements in a column are mapped to the same bank, leading to bank conflicts where reading a column triggers 32-way conflicts. To avoid this, we can increase the number of columns in the Shared Memory space from 32 to 33, so that the elements in a column will not reside in the same bank.
 
-However, we adopt an alternative approach to avoid having the same column data in the same bank by staggering the elements in the same column.
+Alternatively, we opt for a different tactic to prevent column elements from sharing a bank without using redundant storage:
 
 ```c
 template <int BLOCK_SIZE>
@@ -106,7 +106,7 @@ __global__ void transposeSharedwBC(float *inputMat, float *outputMat, int N)
 
 ### 1.5 Performing More Computations per Thread
 
-In the previous implementation, each thread only performed computations for one element. However, in reality, the kernel function can execute multiple independent instructions in parallel. By unrolling the loop, we can make each thread perform more computations. For example, setting TILE to 32 and SIDE to 8 requires only $32 \times 8$ threads in a block, with each thread responsible for computing 4 elements, while the previous implementation would require $32 \times 32$ threads.
+In the previous implementation, each thread only performed computations for one element. Nevertheless, in modern GPGPU architecture, the kernel function can execute multiple independent instructions in parallel. By unrolling the loop, we can make each thread perform more computations. For instance, setting TILE to 32 and SIDE to 8 requires only $32 \times 8$ threads in a block, with each thread responsible for computing 4 elements, while the previous implementation would require $32 \times 32$ threads.
 
 ```c
 template <int TILE, int SIDE>
@@ -140,11 +140,11 @@ __global__ void transposeUnrolled(float *inputMat, float *outputMat, int N)
 ### 2.1 Experimental Setup
 
 
-The experiment was conducted on an NVIDIA A800-SXM4-80GB GPU with a peak FP32 performance of 19.5 TFLOPS. It has 40GB of high-speed HBM2e memory with a bandwidth of 1935 GB/s. The GPU features 128 streaming multiprocessors.
+The experiment was conducted on an NVIDIA A800-SXM4-80GB GPU boasting peak FP32 performance of 19.5 TFLOPS. It has 40GB of high-speed HBM2e memory with a bandwidth of 1935 GB/s. The GPU comprises 128 streaming multiprocessors.
 
 ### 2.2 Code
 
-Instead of using `<chrono>`, we use `cudaEventRecord` to measure GPU-side time because executing the kernel function may be asynchronous to the CPU. The `transposeGPUWrapper` in the code is a wrapper for the kernel function. Before measuring the runtime of the kernel function, we execute it once for warm-up to fully utilize the GPU's performance and accurately measure the real performance of different implementation versions.
+Instead of using `<chrono>`, we chose `cudaEventRecord` to measure GPU-side time, as executing the kernel function may be asynchronous to CPU. The `transposeGPUWrapper` in the code serves as a wrapper for the kernel function. Before measuring the runtime of the kernel function, we execute it once for warm-up.
 
 ```c
 float measureGPUTime(float *inputMat, float *outputMat, int N, int imp)
@@ -184,7 +184,7 @@ float measureGPUTime(float *inputMat, float *outputMat, int N, int imp)
 }
 ```
 
-We tested all versions on a $4000 \times 4000$ ($N = 4000$) single-precision floating-point matrix. We executed the kernel function for each implementation version with different block sizes. The runtime was measured using the aforementioned code, and the results were verified to match that of the CPU implementation.
+We tested all versions on a $4000 \times 4000$ ($N = 4000$) single-precision floating-point matrix. We executed the kernel function for each implementation version with different block sizes. The runtime was measured using the aforementioned code, and the output was verified to match that of the CPU implementation.
 
 We invoked the kernel function as follows:
 

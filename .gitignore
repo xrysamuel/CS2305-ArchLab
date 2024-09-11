@@ -5,5 +5,9 @@ chisel-template/
 .vscode/
 .metals/
 .scalafmt.conf
-chipyard/
+MatMul/chipyard/
 .bloop/
+temp/
+boot.elf
+mlp/
+chipyard_rocc/
